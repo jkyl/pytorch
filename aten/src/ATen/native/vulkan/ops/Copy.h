@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef USE_VULKAN_API
+#ifdef USE_VULKAN
 
 #include <ATen/native/vulkan/ops/Common.h>
 
@@ -16,4 +16,4 @@ Tensor& copy_(Tensor& self, const Tensor& src);
 } // namespace native
 } // namespace at
 
-#endif /* USE_VULKAN_API */
+#endif /* USE_VULKAN */
