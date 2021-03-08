@@ -18,7 +18,7 @@ from torch.testing import \
      all_types_and_complex_and, all_types_and, all_types_and_complex,
      integral_types_and)
 from torch.testing._internal.common_device_type import \
-    (skipIf, skipCUDAIfNoMagma, skipCPUIfNoLapack, skipCPUIfNoMkl,
+    (dtypes, skipCUDAIfNoMagmaAndNoCusolver, skipIf, skipCUDAIfNoMagma, skipCPUIfNoLapack, skipCPUIfNoMkl,
      skipCUDAIfRocm, expectedAlertNondeterministic, precisionOverride,)
 from torch.testing._internal.common_cuda import CUDA11OrLater
 from torch.testing._internal.common_utils import \
@@ -358,6 +358,28 @@ def sample_inputs_tensor_split(op_info, device, dtype, requires_grad):
                                     requires_grad=requires_grad),
                         args=(torch.tensor([1, 2, 3]),),
                         kwargs=dict(dim=1)),)
+
+def sample_inputs_linalg_matrix_power(op_info, device, dtype, requires_grad):
+    # (<matrix_size>, (<batch_sizes, ...>))
+    test_sizes = [
+        (1, ()),
+        (S, ()),
+        (S, (0,)),
+        (S, (2,)),
+    ]
+
+    inputs = []
+    for matrix_size, batch_sizes in test_sizes:
+        size = batch_sizes + (matrix_size, matrix_size)
+        for n in (0, 1, 3, 5):
+            t = make_tensor(size, device, dtype, requires_grad=requires_grad)
+            inputs.append(SampleInput(t, args=(n,)))
+        for n in [-4, -2, -1]:
+            t = random_fullrank_matrix_distinct_singular_value(matrix_size, *batch_sizes, device=device, dtype=dtype)
+            t.requires_grad = requires_grad
+            inputs.append(SampleInput(t, args=(n,)))
+
+    return inputs
 
 def sample_inputs_linalg_norm(op_info, device, dtype, requires_grad):
     test_sizes = [
@@ -1928,6 +1950,14 @@ op_db: List[OpInfo] = [
            sample_inputs_func=sample_inputs_floor_divide,
            decorators=[_wrap_warn_once("floor_divide is deprecated, and will be removed")],
            supports_autograd=False,
+           ),
+    OpInfo('linalg.matrix_power',
+           aten_name='linalg_matrix_power',
+           dtypes=floating_and_complex_types(),
+           test_inplace_grad=False,
+           supports_tensor_out=True,
+           decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+           sample_inputs_func=sample_inputs_linalg_matrix_power,
            ),
     OpInfo('linalg.norm',
            op=torch.linalg.norm,

@@ -22,6 +22,8 @@
 #include <limits>
 #include <numeric>
 #include <vector>
+#include "Functions.h"
+#include "c10/core/MemoryFormat.h"
 
 
 namespace at {
@@ -193,6 +195,111 @@ Tensor& linalg_pinv_out(Tensor& result, const Tensor& input, double rcond, bool 
 
 Tensor pinverse(const Tensor& self, double rcond) {
   return at::linalg_pinv(self, rcond, /*hermitian=*/false);
+}
+
+Tensor& linalg_matrix_power_out(const Tensor& self, int64_t n, Tensor& result) {
+  squareCheckInputs(self);
+  checkSameDevice("matrix_power", result, self);
+  checkLinalgCompatibleDtype("matrix_power", result, self);
+  at::native::resize_output(result, self.sizes());
+
+  // Fast paths for exponents <= 3
+  if (n == 0) {
+    return result.copy_(at::eye(self.size(-2), self.options()));
+  } else if (n == 1) {
+    return result.copy_(self);
+  } else if (n == -1) {
+    return at::linalg_inv_out(result, self);
+  }
+
+  auto a = n < 0 ? at::linalg_inv(self) : self;
+  n = std::abs(n);
+
+  if (n == 2) {
+    return at::matmul_out(result, a, a);
+  } else if (n == 3) {
+    return at::matmul_out(result, at::matmul(a, a), a);
+  }
+
+  // This is a binary decomposition of n.
+  // Moving from the least significant bit to the most significant bit
+  // This is done to reduce the number of matrix multiplications
+  // by raising the input matrix in powers of 2
+  // The total number of matrix multiplications are
+  // number of bits + number of bits that equal 1 ~ O(log n)
+  // instead of O(n)
+  Tensor z, res;
+  while (true) {
+    auto bit = n % 2;
+    n = n / 2;
+    z = z.defined() ? at::matmul(z, z) : a;
+    if (bit == 1) {
+      if (n <= 0) {
+        if (res.defined()) {
+          at::matmul_out(result, res, z);
+        } else {
+          result.copy_(z);
+        }
+        break;
+      } else {
+        res = res.defined() ? at::matmul(res, z) : z;
+      }
+    }
+  }
+
+  return result;
+}
+
+Tensor linalg_matrix_power(const Tensor& self, int64_t n) {
+  squareCheckInputs(self);
+
+  // For n=0 we return the identity matrix of the same shape
+  // as input. We are cloning here to include the result in
+  // the autograd graph.
+  if (n == 0) {
+    return self.clone(at::MemoryFormat::Contiguous)
+        .copy_(at::eye(self.size(-2), self.options()));
+  }
+
+  // Handle n=1 separately as it's the only other case
+  // for which input needs to be cloned
+  if (n == 1) {
+    return self.clone(at::MemoryFormat::Contiguous);
+  }
+
+  auto a = n < 0 ? at::linalg_inv(self) : self;
+  n = std::abs(n);
+
+  // Fast paths for exponents <= 3
+  if (n == 1) {
+    return a;
+  } else if (n == 2) {
+    return at::matmul(a, a);
+  } else if (n == 3) {
+    return at::matmul(at::matmul(a, a), a);
+  }
+
+  // This is a binary decomposition of n.
+  // Moving from the least significant bit to the most significant bit
+  // This is done to reduce the number of matrix multiplications
+  // by raising the input matrix in powers of 2
+  // The total number of matrix multiplications are
+  // number of bits + number of bits that equal 1 ~ O(log n)
+  // instead of O(n)
+  Tensor z, result;
+  while (n > 0) {
+    z = z.defined() ? at::matmul(z, z) : a;
+    if (n % 2 == 1) {
+      result = result.defined() ? at::matmul(result, z) : z;
+    }
+    n = n / 2;
+  }
+
+  return result;
+}
+
+Tensor matrix_power(const Tensor& self, int64_t n) {
+  return at::native::linalg_matrix_power(self, n);
 }
 
 Tensor& linalg_matrix_rank_out(Tensor& result, const Tensor& self, optional<double> tol, bool hermitian) {
@@ -1528,44 +1635,6 @@ Tensor matrix_exp_backward(const Tensor& self, const Tensor& grad) {
       return a.matrix_exp();
     }
   );
-}
-
-Tensor matrix_power(const Tensor& a, int64_t n) {
-  TORCH_CHECK(a.dim() >= 2 && (at::isFloatingType(a.scalar_type()) || at::isComplexType(a.scalar_type())),
-              "matrix_power(", a.scalar_type(), "{", a.sizes(), "}): expected a tensor "
-              "of floating types with dim at least 2");
-  if (n == 0) {
-    return a.clone(at::MemoryFormat::Contiguous).copy_(at::eye(a.size(-2), a.options()).expand_as(a));
-  } else if (n < 0) {
-    Tensor a_ = at::inverse(a);
-    n *= -1;
-    return at::native::matrix_power(a_, n);
-  } else if (n == 1) {
-    return a.clone(at::MemoryFormat::Contiguous);
-  } else if (n == 2) {
-    return at::native::matmul(a, a);
-  } else if (n == 3) {
-    return at::native::matmul(at::native::matmul(a, a), a);
-  }
-
-  // This is a binary decomposition of n.
-  // Moving from the least significant bit to the most significant bit
-  // This is done to reduce the number of matrix multiplications
-  // by raising the input matrix in powers of 2
-  // The total number of matrix multiplications are
-  // number of bits + number of bits that equal 1 ~ O(log n)
-  // instead of O(n)
-  Tensor result, z;
-  int64_t r;
-  while (n > 0) {
-    z = (!z.defined()) ? a.clone(at::MemoryFormat::Contiguous) : at::native::matmul(z, z);
-    r = n % 2;
-    n = n / 2;
-    if (r == 1) {
-      result = (!result.defined()) ? z.clone(at::MemoryFormat::Contiguous) : at::native::matmul(result, z);
-    }
-  }
-  return result;
 }
 
 Tensor frobenius_norm(const Tensor& self) {
